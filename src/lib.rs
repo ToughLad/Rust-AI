@@ -26,18 +26,7 @@ pub mod routing;           // AI provider routing logic
 pub mod search_service;    // Web search integration
 pub mod types;             // Shared type definitions
 
-use reqwest::Client;
 
-// Internal imports for testing
-use crate::{
-    auth::{AuthService, CreateUserRequest, LoginRequest},
-    config::Config,
-    convex_service::ConvexService,
-    file_processor::{process_file_attachments, supports_multimodal},
-    routing::{build_routing, resolve_route},
-    search_service::SearchService,
-    types::{Attachment, InvokeRequest, MessageRole, Operation, Provider, ChatMessage},
-};
 
 /// Integration test for basic system functionality
 /// 
@@ -48,9 +37,18 @@ use crate::{
 /// - Multimodal support detection
 /// 
 /// This test ensures all major components can be initialized
-/// and perform basic operations without errors.
-#[tokio::test]
-async fn test_basic_functionality() {
+/// and work together without errors.
+#[test] 
+fn test_basic_functionality() {
+    use crate::{
+        auth::AuthService,
+        config::Config,
+        convex_service::ConvexService,
+        file_processor::supports_multimodal,
+        routing::{build_routing, resolve_route},
+        search_service::SearchService,
+    };
+
     // Test configuration loading from environment variables
     let config = Config::from_env();
     assert!(!config.bind_address.is_empty());
@@ -69,7 +67,7 @@ async fn test_basic_functionality() {
 
     // Test service initialization with dependency injection
     let convex_service = ConvexService::new(config.clone());
-    let auth_service = AuthService::new(config.clone(), convex_service.clone());
+    let _auth_service = AuthService::new(config.clone(), convex_service.clone());
     let search_service = SearchService::new(config.clone());
 
     // Test search service basic functionality
@@ -86,6 +84,7 @@ async fn test_basic_functionality() {
 /// custom serialization attributes.
 #[test]
 fn test_types_serialization() {
+    use crate::types::{MessageRole, Provider, ChatMessage};
     use serde_json;
 
     // Test ChatMessage serialization with role-based content

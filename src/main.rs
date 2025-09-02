@@ -23,12 +23,11 @@ use anyhow::Result;
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    middleware,
     response::Json,
     routing::{get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -38,7 +37,7 @@ use tokio::signal;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 // Internal module imports
@@ -50,6 +49,7 @@ use types::{ApiResponse, InvokeRequest, AuthUser};
 
 // Rate limiting configuration for guest users
 // This prevents abuse while allowing trial usage without registration
+#[allow(dead_code)]
 const MAX_GUEST_MESSAGES_PER_DAY: u32 = 5;
 
 /// Guest usage tracking structure for rate limiting
@@ -57,6 +57,7 @@ const MAX_GUEST_MESSAGES_PER_DAY: u32 = 5;
 /// Tracks usage count and reset timestamp for guest users to enforce
 /// daily limits without requiring database persistence.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct GuestUsage {
     /// Number of requests made by this guest today
     count: u32,
@@ -75,6 +76,7 @@ type GuestUsageMap = Arc<Mutex<HashMap<String, GuestUsage>>>;
 /// Contains all services and configuration needed to process requests.
 /// Cloned cheaply due to Arc wrappers in underlying services.
 #[derive(Clone)]
+#[allow(dead_code)]
 struct AppState {
     /// Application configuration loaded from environment
     config: Config,
@@ -132,6 +134,7 @@ struct AnalyticsQuery {
 /// 
 /// # Returns
 /// Timestamp in milliseconds representing the start of the next day
+#[allow(dead_code)]
 fn start_of_next_day(timestamp: u64) -> u64 {
     // Add 24 hours to current time, then round down to start of day
     let next_day = timestamp + (24 * 60 * 60 * 1000);
@@ -153,13 +156,267 @@ fn start_of_next_day(timestamp: u64) -> u64 {
 /// 
 /// # Returns
 /// String key for tracking this guest in the usage map
+#[allow(dead_code)]
 fn get_guest_key(fingerprint: Option<&str>, ip_address: Option<&str>, user_id: Option<&str>) -> String {
     // If we have an anonymous user ID, use that for consistency
     if let Some(uid) = user_id {
         if uid.starts_with("anon-") {
             return format!("anon:{}", uid);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum_test::TestServer;
+    use serde_json::{json, Value};
+    
+    fn create_test_app_state() -> AppState {
+        let config = Config::from_env();
+        let convex_service = ConvexService::new(config.clone());
+        let auth_service = AuthService::new(config.clone(), convex_service.clone());
+        let search_service = SearchService::new(config.clone());
+        
+        AppState {
+            config,
+            auth_service,
+            convex_service,
+            search_service,
+            guest_usage: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+    
+    #[tokio::test]
+    async fn test_health_check() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let response = server.get("/health").await;
+        
+        response.assert_status_ok();
+        response.assert_json(&json!({
+            "status": "ok",
+            "service": "rust-ai-api",
+            "version": env!("CARGO_PKG_VERSION")
+        }));
+    }
+    
+    #[tokio::test]
+    async fn test_invoke_endpoint_structure() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let request_body = json!({
+            "operation": "chat",
+            "tier": "fast",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello, AI!"
+                }
+            ]
+        });
+        
+        let response = server.post("/v1/invoke").json(&request_body).await;
+        
+        response.assert_status_ok();
+        
+        let body: Value = response.json();
+        assert_eq!(body["status"], "success");
+        assert!(body["data"]["request_id"].is_string());
+        assert_eq!(body["data"]["status"], "processed");
+    }
+    
+    #[tokio::test]
+    async fn test_invoke_endpoint_invalid_request() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let invalid_request = json!({
+            "invalid_field": "value"
+        });
+        
+        let response = server.post("/v1/invoke").json(&invalid_request).await;
+        
+        // Should return 400 Bad Request or similar for malformed JSON
+        assert!(response.status_code().is_client_error());
+    }
+    
+    #[tokio::test]
+    async fn test_analytics_endpoint() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let response = server.get("/v1/analytics").await;
+        
+        response.assert_status_ok();
+        
+        let body: Value = response.json();
+        assert_eq!(body["status"], "success");
+        assert!(body["data"].is_object());
+        // Should contain analytics data structure
+        assert!(body["data"]["total_requests"].is_number());
+        assert!(body["data"]["active_users"].is_number());
+    }
+    
+    #[tokio::test]
+    async fn test_anonymous_session_creation() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let response = server.post("/v1/auth/anonymous").await;
+        
+        response.assert_status_ok();
+        
+        let body: Value = response.json();
+        assert_eq!(body["status"], "success");
+        assert!(body["data"]["token"].is_string());
+        assert!(body["data"]["user"]["is_anonymous"].as_bool().unwrap());
+        assert!(body["data"]["user"]["id"].as_str().unwrap().starts_with("anon-"));
+    }
+    
+    #[tokio::test]
+    async fn test_user_registration_endpoint() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let registration_request = json!({
+            "email": "test@example.com",
+            "password": "securepassword123"
+        });
+        
+        let response = server.post("/v1/auth/register").json(&registration_request).await;
+        
+        // Note: This might fail in the actual implementation due to validation
+        // or database constraints, but we're testing the endpoint structure
+        response.assert_status_ok();
+        
+        let body: Value = response.json();
+        // Should return success or appropriate validation error
+        assert!(body["status"].is_string());
+    }
+    
+    #[tokio::test]
+    async fn test_login_endpoint() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let login_request = json!({
+            "email": "test@example.com",
+            "password": "password123"
+        });
+        
+        let response = server.post("/v1/auth/login").json(&login_request).await;
+        
+        response.assert_status_ok();
+        
+        let body: Value = response.json();
+        assert_eq!(body["status"], "success");
+        // Login should fail for non-existent user but return proper structure
+        assert!(body["data"].is_object());
+    }
+    
+    #[tokio::test]
+    async fn test_cors_headers() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let response = server.get("/health").await;
+        
+        // Check that CORS headers are present
+        assert!(response.headers().contains_key("access-control-allow-origin"));
+    }
+    
+    #[tokio::test]
+    async fn test_nonexistent_route() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let response = server.get("/nonexistent").await;
+        
+        response.assert_status_not_found();
+    }
+    
+    #[tokio::test]
+    async fn test_invoke_with_attachments() {
+        let state = create_test_app_state();
+        let app = create_router(state);
+        let server = TestServer::new(app).unwrap();
+        
+        let request_body = json!({
+            "operation": "chat",
+            "tier": "smart",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Analyze this file"
+                }
+            ],
+            "attachments": [
+                {
+                    "filename": "test.txt",
+                    "content_type": "text/plain",
+                    "data": "SGVsbG8gV29ybGQ=" // Base64: "Hello World"
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1000
+        });
+        
+        let response = server.post("/v1/invoke").json(&request_body).await;
+        
+        response.assert_status_ok();
+        
+        let body: Value = response.json();
+        assert_eq!(body["status"], "success");
+        assert!(body["data"]["request_id"].is_string());
+    }
+    
+    #[test]
+    fn test_guest_usage_functions() {
+        // Test get_guest_key function
+        let key1 = get_guest_key(Some("fingerprint123"), Some("192.168.1.1"), None);
+        assert_eq!(key1, "fingerprint123|192.168.1.1");
+        
+        let key2 = get_guest_key(None, Some("192.168.1.1"), Some("anon-123"));
+        assert_eq!(key2, "anon:anon-123");
+        
+        let key3 = get_guest_key(None, Some("192.168.1.1"), None);
+        assert_eq!(key3, "ip:192.168.1.1");
+        
+        // Test start_of_next_day function
+        let timestamp = 1640995200000; // Jan 1, 2022 00:00:00 UTC
+        let next_day = start_of_next_day(timestamp);
+        let expected_next_day = 1641081600000; // Jan 2, 2022 00:00:00 UTC
+        assert_eq!(next_day, expected_next_day);
+    }
+    
+    #[test]
+    fn test_check_guest_daily_limit() {
+        let guest_usage = Arc::new(Mutex::new(HashMap::new()));
+        
+        // First request should be allowed
+        let (allowed, remaining, reset_at, _message) = check_guest_daily_limit(
+            &guest_usage,
+            Some("fingerprint123"),
+            Some("192.168.1.1"),
+            None
+        );
+        
+        assert!(allowed);
+        assert_eq!(remaining, 4); // 5 - 1 = 4 remaining
+        assert!(reset_at > 0);
+    }
+}
     // Otherwise combine fingerprint and IP for best guest tracking
     format!("{}|{}", 
         fingerprint.unwrap_or("unknown"), 
@@ -187,6 +444,7 @@ fn get_guest_key(fingerprint: Option<&str>, ip_address: Option<&str>, user_id: O
 /// * `u32` - Remaining requests for today
 /// * `u64` - Timestamp when limit resets (milliseconds since epoch)
 /// * `String` - Status message for logging/debugging
+#[allow(dead_code)]
 fn check_guest_daily_limit(
     guest_usage: &GuestUsageMap,
     fingerprint: Option<&str>,
@@ -439,8 +697,8 @@ async fn get_analytics(
 /// - 503 SERVICE_UNAVAILABLE: All providers unavailable
 /// - 500 INTERNAL_SERVER_ERROR: Service error
 async fn invoke(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
     Json(request): Json<InvokeRequest>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
     let request_id = Uuid::new_v4().to_string();

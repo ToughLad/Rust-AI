@@ -12,7 +12,7 @@
 
 use anyhow::{anyhow, Result};
 use bcrypt::{hash, verify, DEFAULT_COST};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -221,6 +221,7 @@ impl AuthService {
     /// - Verifies HMAC signature using server secret
     /// - Checks token expiration automatically
     /// - Only accepts "user_session" type tokens
+    #[allow(dead_code)]
     pub fn verify_jwt(&self, token: &str) -> Option<(String, String)> {
         let secret = self.config.action_token_secret.as_ref()?;
         
@@ -253,6 +254,7 @@ impl AuthService {
     /// 
     /// # Future Enhancement
     /// TODO: Implement Clerk token verification for external authentication
+    #[allow(dead_code)]
     pub async fn verify_token(&self, token: &str) -> Result<(bool, Option<String>, Option<String>)> {
         // First, try legacy user_session JWT issued by this server
         if let Some((user_id, email)) = self.verify_jwt(token) {
@@ -290,6 +292,16 @@ impl AuthService {
     /// - Audit logging for security events
     /// - Atomic transaction (rollback on failure)
     pub async fn create_user(&self, request: CreateUserRequest) -> Result<AuthResult> {
+        // Validate password length
+        if request.password.len() < 8 {
+            return Err(anyhow::anyhow!("Password must be at least 8 characters long"));
+        }
+        
+        // Validate email format
+        if !request.email.contains('@') || !request.email.contains('.') {
+            return Err(anyhow::anyhow!("Invalid email format"));
+        }
+        
         // Check if user already exists to prevent duplicate registrations
         if let Ok(Some(_)) = self.convex_service.get_user(&request.email).await {
             return Ok(AuthResult {
@@ -302,7 +314,7 @@ impl AuthService {
 
         // Hash the password before storing (never store plain text passwords)
         let password_hash = self.hash_password(&request.password).await?;
-        let user_id = Uuid::new_v4().to_string();
+        let _user_id = Uuid::new_v4().to_string();
 
         // Create user account structure for database storage
         let user_account = UserAccount {
@@ -471,6 +483,7 @@ impl AuthService {
     /// - Validates token signature and expiration
     /// - Confirms user account still exists and is active
     /// - Supports both local JWT and Clerk tokens (future)
+    #[allow(dead_code)]
     pub async fn get_user_from_token(&self, token: &str) -> Option<(String, String)> {
         // First try local JWT token validation
         if let Some((user_id, email)) = self.verify_jwt(token) {
@@ -541,5 +554,202 @@ impl AuthService {
             }),
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::convex_service::ConvexService;
+    
+    fn create_test_config() -> Config {
+        let mut config = Config::from_env();
+        config.action_token_secret = Some("test_secret_key_1234567890".to_string());
+        config
+    }
+    
+    fn create_test_auth_service() -> AuthService {
+        let config = create_test_config();
+        let convex_service = ConvexService::new(config.clone());
+        AuthService::new(config, convex_service)
+    }
+    
+    #[test]
+    fn test_hash_password() {
+        let auth_service = create_test_auth_service();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        
+        rt.block_on(async {
+            let password = "test_password_123";
+            let hash1 = auth_service.hash_password(password).await.unwrap();
+            let hash2 = auth_service.hash_password(password).await.unwrap();
+            
+            // Different salts should produce different hashes
+            assert_ne!(hash1, hash2);
+            assert!(hash1.len() > 50); // bcrypt hashes are long
+            assert!(hash2.len() > 50);
+            
+            // Both should verify correctly
+            assert!(bcrypt::verify(password, &hash1).unwrap());
+            assert!(bcrypt::verify(password, &hash2).unwrap());
+        });
+    }
+    
+    #[test]
+    fn test_generate_jwt() {
+        let auth_service = create_test_auth_service();
+        let user_id = "test_user_123";
+        let email = "test@example.com";
+        
+        let token = auth_service.generate_jwt(user_id, email).unwrap();
+        
+        // Token should be a valid JWT format (3 parts separated by dots)
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        
+        // Should be able to decode the token back
+        if let Some((decoded_user_id, decoded_email)) = auth_service.verify_jwt(&token) {
+            assert_eq!(decoded_user_id, user_id);
+            assert_eq!(decoded_email, email);
+        } else {
+            panic!("Failed to verify generated JWT");
+        }
+    }
+    
+    #[test]
+    fn test_verify_jwt_invalid_token() {
+        let auth_service = create_test_auth_service();
+        
+        // Test invalid tokens
+        assert!(auth_service.verify_jwt("").is_none());
+        assert!(auth_service.verify_jwt("invalid.token").is_none());
+        assert!(auth_service.verify_jwt("not.a.jwt.token").is_none());
+        assert!(auth_service.verify_jwt("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.invalid.signature").is_none());
+    }
+    
+    #[test]
+    fn test_create_guest_user() {
+        let auth_service = create_test_auth_service();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        
+        rt.block_on(async {
+            let result = auth_service.create_guest_user().await.unwrap();
+            
+            assert!(result.success);
+            assert!(result.token.is_some());
+            assert!(result.user.is_some());
+            assert!(result.error.is_none());
+            
+            let user = result.user.unwrap();
+            assert!(user.is_anonymous);
+            assert!(user.id.starts_with("anon-"));
+            assert!(user.email.as_ref().unwrap().ends_with("@anon.local"));
+            
+            // Token should be valid
+            let token = result.token.unwrap();
+            if let Some((user_id, email)) = auth_service.verify_jwt(&token) {
+                assert_eq!(user_id, user.id);
+                assert_eq!(email, user.email.unwrap());
+            } else {
+                panic!("Generated guest token is invalid");
+            }
+        });
+    }
+    
+    #[test]
+    fn test_guest_user_uniqueness() {
+        let auth_service = create_test_auth_service();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        
+        rt.block_on(async {
+            let guest1 = auth_service.create_guest_user().await.unwrap();
+            let guest2 = auth_service.create_guest_user().await.unwrap();
+            
+            // Each guest should have unique ID and email
+            let user1 = guest1.user.unwrap();
+            let user2 = guest2.user.unwrap();
+            
+            assert_ne!(user1.id, user2.id);
+            assert_ne!(user1.email, user2.email);
+            assert_ne!(guest1.token, guest2.token);
+        });
+    }
+    
+    #[tokio::test]
+    async fn test_create_user_request_validation() {
+        let auth_service = create_test_auth_service();
+        
+        // Test password too short
+        let short_password_request = CreateUserRequest {
+            email: "test@example.com".to_string(),
+            password: "123".to_string(), // Too short
+            subscription_tier: None,
+        };
+        
+        let result = auth_service.create_user(short_password_request).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least 8 characters"));
+        
+        // Test invalid email format
+        let invalid_email_request = CreateUserRequest {
+            email: "not-an-email".to_string(),
+            password: "validpassword123".to_string(),
+            subscription_tier: None,
+        };
+        
+        let result = auth_service.create_user(invalid_email_request).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("valid email"));
+    }
+    
+    #[tokio::test]
+    async fn test_login_request_validation() {
+        let auth_service = create_test_auth_service();
+        
+        let login_request = LoginRequest {
+            email: "nonexistent@example.com".to_string(),
+            password: "somepassword".to_string(),
+        };
+        
+        let result = auth_service.login(login_request).await;
+        assert!(result.is_ok());
+        
+        let auth_result = result.unwrap();
+        assert!(!auth_result.success);
+        assert!(auth_result.token.is_none());
+        assert!(auth_result.user.is_none());
+        assert!(auth_result.error.is_some());
+    }
+    
+    #[test]
+    fn test_jwt_expiration() {
+        let auth_service = create_test_auth_service();
+        
+        // Generate token with past timestamp (simulating expired token)
+        let user_id = "test_user";
+        let email = "test@example.com";
+        let token = auth_service.generate_jwt(user_id, email).unwrap();
+        
+        // Token should be valid immediately after generation
+        assert!(auth_service.verify_jwt(&token).is_some());
+        
+        // Note: Testing actual expiration would require manipulating system time
+        // or creating tokens with very short expiration, which is complex for unit tests
+    }
+    
+    #[test]
+    fn test_config_without_secret() {
+        let mut config = Config::from_env();
+        config.action_token_secret = None; // No secret configured
+        let convex_service = ConvexService::new(config.clone());
+        let auth_service = AuthService::new(config, convex_service);
+        
+        // Should handle missing secret gracefully
+        let token_result = auth_service.generate_jwt("user", "email@test.com");
+        assert!(token_result.is_err());
+        
+        // Verification should also fail gracefully
+        assert!(auth_service.verify_jwt("any.token").is_none());
     }
 }

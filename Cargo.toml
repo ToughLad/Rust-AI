@@ -73,3 +73,4 @@ urlencoding = "2.0"
 
 [dev-dependencies]
 tokio-test = "0.4"
+axum-test = "14.0"

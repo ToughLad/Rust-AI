@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
 use crate::config::Config;
@@ -24,18 +24,21 @@ struct TavilyRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TavilyResponse {
     results: Vec<TavilyResult>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TavilyResult {
     title: String,
     url: String,
     content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct BraveRequest {
     q: String,
     count: u8,
@@ -43,16 +46,19 @@ struct BraveRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BraveResponse {
     web: Option<BraveWeb>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BraveWeb {
     results: Vec<BraveResult>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BraveResult {
     title: String,
     url: String,
@@ -60,6 +66,7 @@ struct BraveResult {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct SearxngResult {
     title: String,
     url: String,
@@ -67,12 +74,14 @@ struct SearxngResult {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct SearchService {
     config: Config,
     client: Client,
     cache: SearchCache,
 }
 
+#[allow(dead_code)]
 impl SearchService {
     pub fn new(config: Config) -> Self {
         let client = Client::builder()
@@ -106,7 +115,8 @@ impl SearchService {
             Regex::new(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},?\s*20(2[4-9]|[3-9]\d)\b").unwrap(),
             Regex::new(r"\bwhat\s+(is|are|was|were)\s+the\b").unwrap(),
             Regex::new(r"\bhow\s+(much|many|long|far|old)\s+(is|are|does|do)\b").unwrap(),
-            Regex::new(r"\b(who|what|when|where|which)\s+.*\s+(win|won|winning|winner|elected|announced|released|launched)\b").unwrap(),
+            Regex::new(r"\b(who|what|when|where|which).*(win|won|winning|winner|elected|announced|released|launched)\b").unwrap(),
+            Regex::new(r"\b(who\s+is|who\s+won|who\s+will|what\s+is\s+happening)\b").unwrap(),
         ];
 
         patterns.iter().any(|pattern| pattern.is_match(&lower_query))
@@ -114,6 +124,16 @@ impl SearchService {
 
     /// Perform web search using available providers
     pub async fn perform_web_search(&self, query: &str) -> Result<SearchResponse> {
+        // If search is not enabled, return disabled response
+        if !self.config.search.enabled {
+            return Ok(SearchResponse {
+                query: query.to_string(),
+                results: Vec::new(),
+                provider: "disabled".to_string(),
+                took_ms: 0,
+            });
+        }
+
         // Check cache first
         let cache_key = format!("search:{}", query);
         if let Ok(cache) = self.cache.lock() {
@@ -314,6 +334,271 @@ impl SearchService {
         if let Ok(mut cache) = self.cache.lock() {
             let cache_duration = Duration::from_secs(self.config.search.cache_duration);
             cache.retain(|_, (_, cached_at)| cached_at.elapsed() < cache_duration);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, SearchConfig, TavilyConfig, BraveConfig, SearxngConfig};
+    
+    fn create_test_config(enabled: bool) -> Config {
+        let mut config = Config::from_env();
+        config.search = SearchConfig {
+            enabled,
+            cache_duration: 300, // 5 minutes
+            tavily: TavilyConfig {
+                api_key: "test_tavily_key".to_string(),
+                base_url: "https://api.tavily.com".to_string(),
+            },
+            brave: BraveConfig {
+                api_key: "test_brave_key".to_string(),
+                base_url: "https://api.search.brave.com".to_string(),
+            },
+            searxng: SearxngConfig {
+                base_url: "http://localhost:8090".to_string(),
+                enabled: true,
+            },
+        };
+        config
+    }
+    
+    #[test]
+    fn test_search_service_new() {
+        let config = create_test_config(true);
+        let service = SearchService::new(config.clone());
+        
+        assert_eq!(service.config.search.enabled, true);
+        assert_eq!(service.config.search.cache_duration, 300);
+        assert_eq!(service.config.search.tavily.api_key, "test_tavily_key");
+    }
+    
+    #[test]
+    fn test_needs_internet_search() {
+        let config = create_test_config(true);
+        let service = SearchService::new(config);
+        
+        // Should NOT need search for basic queries
+        assert!(!service.needs_internet_search("hello"));
+        assert!(!service.needs_internet_search("write a poem"));
+        assert!(!service.needs_internet_search("explain recursion"));
+        assert!(!service.needs_internet_search("how to sort an array"));
+        
+        // Should need search for current/recent information
+        assert!(service.needs_internet_search("what's the weather today"));
+        assert!(service.needs_internet_search("latest news"));
+        assert!(service.needs_internet_search("current stock price"));
+        assert!(service.needs_internet_search("today's date"));
+        assert!(service.needs_internet_search("recent developments"));
+        
+        // Should need search for specific factual queries
+        assert!(service.needs_internet_search("population of Tokyo 2024"));
+        assert!(service.needs_internet_search("who won the election"));
+        assert!(service.needs_internet_search("latest iPhone release"));
+        
+        // Edge cases
+        assert!(!service.needs_internet_search(""));
+        assert!(!service.needs_internet_search("   "));
+    }
+    
+    #[test]
+    fn test_needs_internet_search_keywords() {
+        let config = create_test_config(true);
+        let service = SearchService::new(config);
+        
+        // Test specific keywords that should trigger search
+        let search_keywords = [
+            "today", "current", "latest", "recent", "now", "2024", "2025",
+            "news", "weather", "stock", "price", "who is", "what is happening"
+        ];
+        
+        for keyword in search_keywords {
+            assert!(
+                service.needs_internet_search(keyword),
+                "Keyword '{}' should trigger internet search", keyword
+            );
+        }
+        
+        // Test keywords that should NOT trigger search
+        let no_search_keywords = [
+            "explain", "how to", "write", "create", "help", "define",
+            "algorithm", "programming", "code", "function"
+        ];
+        
+        for keyword in no_search_keywords {
+            assert!(
+                !service.needs_internet_search(keyword),
+                "Keyword '{}' should NOT trigger internet search", keyword
+            );
+        }
+    }
+    
+    #[test]
+    fn test_needs_internet_search_case_insensitive() {
+        let config = create_test_config(true);
+        let service = SearchService::new(config);
+        
+        // Should be case insensitive
+        assert!(service.needs_internet_search("TODAY"));
+        assert!(service.needs_internet_search("Today"));
+        assert!(service.needs_internet_search("tOdAy"));
+        assert!(service.needs_internet_search("LATEST NEWS"));
+        assert!(service.needs_internet_search("Latest News"));
+    }
+    
+    #[tokio::test]
+    async fn test_perform_web_search_disabled() {
+        let config = create_test_config(false);
+        let service = SearchService::new(config);
+        
+        let result = service.perform_web_search("test query").await;
+        assert!(result.is_ok());
+        
+        let search_response = result.unwrap();
+        assert_eq!(search_response.query, "test query");
+        assert!(search_response.results.is_empty());
+        assert_eq!(search_response.provider, "disabled");
+    }
+    
+    #[test]
+    fn test_cleanup_cache() {
+        let config = create_test_config(true);
+        let service = SearchService::new(config);
+        
+        // Should not panic when called
+        service.cleanup_cache();
+        
+        // Test multiple calls
+        service.cleanup_cache();
+        service.cleanup_cache();
+    }
+    
+    #[test]
+    fn test_search_result_serialization() {
+        let result = SearchResult {
+            title: "Test Title".to_string(),
+            url: "https://example.com".to_string(),
+            snippet: "Test snippet here".to_string(),
+            score: Some(0.85),
+        };
+        
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: SearchResult = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.title, result.title);
+        assert_eq!(deserialized.url, result.url);
+        assert_eq!(deserialized.snippet, result.snippet);
+        assert_eq!(deserialized.score, result.score);
+    }
+    
+    #[test]
+    fn test_search_response_serialization() {
+        let response = SearchResponse {
+            query: "test query".to_string(),
+            results: vec![
+                SearchResult {
+                    title: "Result 1".to_string(),
+                    url: "https://example1.com".to_string(),
+                    snippet: "Snippet 1".to_string(),
+                    score: Some(0.9),
+                },
+                SearchResult {
+                    title: "Result 2".to_string(),
+                    url: "https://example2.com".to_string(),
+                    snippet: "Snippet 2".to_string(),
+                    score: Some(0.8),
+                },
+            ],
+            provider: "tavily".to_string(),
+            took_ms: 200,
+        };
+        
+        let json = serde_json::to_string(&response).unwrap();
+        let deserialized: SearchResponse = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.query, response.query);
+        assert_eq!(deserialized.results.len(), 2);
+        assert_eq!(deserialized.provider, response.provider);
+        assert_eq!(deserialized.took_ms, response.took_ms);
+        assert_eq!(deserialized.results[0].title, "Result 1");
+        assert_eq!(deserialized.results[1].url, "https://example2.com");
+    }
+    
+    #[test]
+    fn test_tavily_request_serialization() {
+        let request = TavilyRequest {
+            api_key: "test_key_123".to_string(),
+            query: "test search query".to_string(),
+            search_depth: "basic".to_string(),
+            include_answer: true,
+            include_raw_content: false,
+            max_results: 5,
+        };
+        
+        let json = serde_json::to_string(&request).unwrap();
+        let deserialized: TavilyRequest = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.api_key, request.api_key);
+        assert_eq!(deserialized.query, request.query);
+        assert_eq!(deserialized.max_results, request.max_results);
+    }
+    
+    #[test]
+    fn test_brave_request_serialization() {
+        let request = BraveRequest {
+            q: "test query".to_string(),
+            count: 10,
+            search_lang: "en".to_string(),
+        };
+        
+        let json = serde_json::to_string(&request).unwrap();
+        let deserialized: BraveRequest = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.q, request.q);
+        assert_eq!(deserialized.count, request.count);
+        assert_eq!(deserialized.search_lang, request.search_lang);
+    }
+    
+    #[test]
+    fn test_search_patterns() {
+        let config = create_test_config(true);
+        let service = SearchService::new(config);
+        
+        // Test various query patterns that should trigger search
+        let search_queries = vec![
+            "What's happening in Ukraine today?",
+            "Latest Apple stock price",
+            "Current weather in New York",
+            "Who won the Super Bowl 2024?",
+            "Recent COVID-19 updates",
+            "Today's exchange rate USD to EUR",
+            "Breaking news today",
+        ];
+        
+        for query in search_queries {
+            assert!(
+                service.needs_internet_search(query),
+                "Query '{}' should trigger search", query
+            );
+        }
+        
+        // Test queries that should NOT trigger search
+        let no_search_queries = vec![
+            "Explain machine learning",
+            "How to implement binary search",
+            "Write a Python function to sort a list",
+            "What is recursion?",
+            "Help me understand databases",
+            "Create a REST API design",
+            "Explain the MVC pattern",
+        ];
+        
+        for query in no_search_queries {
+            assert!(
+                !service.needs_internet_search(query),
+                "Query '{}' should NOT trigger search", query
+            );
         }
     }
 }

@@ -45,8 +45,8 @@ pub fn env_or(key: &str, fallback: &str) -> String {
 /// - Invalid/Missing: Uses fallback value
 pub fn bool_env(key: &str, fallback: bool) -> bool {
     match env::var(key).as_deref() {
-        Ok("1") | Ok("true") | Ok("TRUE") => true,
-        Ok("0") | Ok("false") | Ok("FALSE") => false,
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") => true,
+        Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO") => false,
         _ => fallback,
     }
 }
@@ -459,5 +459,224 @@ impl Config {
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn test_parse_csv_empty() {
+        assert_eq!(parse_csv(Some("")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_parse_csv_single_item() {
+        assert_eq!(parse_csv(Some("item1")), vec!["item1"]);
+    }
+
+    #[test]
+    fn test_parse_csv_multiple_items() {
+        assert_eq!(parse_csv(Some("item1,item2,item3")), vec!["item1", "item2", "item3"]);
+    }
+
+    #[test]
+    fn test_parse_csv_whitespace() {
+        assert_eq!(parse_csv(Some(" item1 , item2 , item3 ")), vec!["item1", "item2", "item3"]);
+    }
+
+    #[test]
+    fn test_parse_csv_empty_items() {
+        assert_eq!(parse_csv(Some("item1,,item3")), vec!["item1", "item3"]);
+    }
+
+    #[test]
+    fn test_config_from_env_defaults() {
+        // Clear environment variables to test defaults
+        let vars_to_clear = [
+            "BIND_ADDRESS", "PORT", "LOG_LEVEL", "ACTION_TOKEN_SECRET",
+            "CLERK_SECRET_KEY", "CF_ACCOUNT_ID", "CF_API_TOKEN", "OPENAI_API_KEY",
+            "CONVEX_ENABLED", "ENABLE_INTERNET_ACCESS", "SEARCH_CACHE_DURATION"
+        ];
+        
+        let original_values: Vec<_> = vars_to_clear.iter()
+            .map(|var| env::var(var).ok())
+            .collect();
+        
+        for var in &vars_to_clear {
+            env::remove_var(var);
+        }
+        
+        // Verify BIND_ADDRESS is actually cleared
+        assert!(env::var("BIND_ADDRESS").is_err(), "BIND_ADDRESS should be cleared");
+        
+        let config = Config::from_env();
+        
+        // Test default values
+        assert_eq!(config.bind_address, "127.0.0.1:8080");
+        assert!(config.action_token_secret.is_none());
+        assert_eq!(config.clerk.secret_key, "");
+        assert_eq!(config.cloudflare.account_id, "");
+        assert_eq!(config.openai.base_url, "https://api.openai.com");
+        assert!(config.convex.enabled);
+        assert!(config.search.enabled);
+        assert_eq!(config.search.cache_duration, 300);
+        
+        // Restore original values
+        for (var, original_value) in vars_to_clear.iter().zip(original_values) {
+            if let Some(value) = original_value {
+                env::set_var(var, value);
+            }
+        }
+    }
+
+    #[test]
+    fn test_config_from_env_custom_values() {
+        // Clean up any existing values first to ensure test isolation
+        env::remove_var("BIND_ADDRESS");
+        env::remove_var("PORT");
+        env::remove_var("LOG_LEVEL");
+        env::remove_var("ACTION_TOKEN_SECRET");
+        env::remove_var("CONVEX_ENABLED");
+        env::remove_var("ENABLE_INTERNET_ACCESS");
+        env::remove_var("SEARCH_CACHE_DURATION");
+        
+        // Set custom environment variables
+        env::set_var("BIND_ADDRESS", "127.0.0.1");
+        env::set_var("PORT", "8080");
+        env::set_var("LOG_LEVEL", "debug");
+        env::set_var("ACTION_TOKEN_SECRET", "test_secret_123");
+        env::set_var("CONVEX_ENABLED", "false");
+        env::set_var("ENABLE_INTERNET_ACCESS", "false");
+        env::set_var("SEARCH_CACHE_DURATION", "600");
+        
+        let config = Config::from_env();
+        
+        assert_eq!(config.bind_address, "127.0.0.1");
+        assert_eq!(config.action_token_secret, Some("test_secret_123".to_string()));
+        assert!(!config.convex.enabled);
+        assert!(!config.search.enabled);
+        assert_eq!(config.search.cache_duration, 600);
+        
+        // Clean up
+        env::remove_var("BIND_ADDRESS");
+        env::remove_var("PORT");
+        env::remove_var("LOG_LEVEL");
+        env::remove_var("ACTION_TOKEN_SECRET");
+        env::remove_var("CONVEX_ENABLED");
+        env::remove_var("ENABLE_INTERNET_ACCESS");
+        env::remove_var("SEARCH_CACHE_DURATION");
+    }
+
+    #[test]
+    fn test_bool_env_function() {
+        // Test true values
+        env::set_var("TEST_BOOL_TRUE", "true");
+        assert!(bool_env("TEST_BOOL_TRUE", false));
+        
+        env::set_var("TEST_BOOL_1", "1");
+        assert!(bool_env("TEST_BOOL_1", false));
+        
+        env::set_var("TEST_BOOL_YES", "yes");
+        assert!(bool_env("TEST_BOOL_YES", false));
+        
+        // Test false values
+        env::set_var("TEST_BOOL_FALSE", "false");
+        assert!(!bool_env("TEST_BOOL_FALSE", true));
+        
+        env::set_var("TEST_BOOL_0", "0");
+        assert!(!bool_env("TEST_BOOL_0", true));
+        
+        // Test default value when env var doesn't exist
+        env::remove_var("TEST_BOOL_MISSING");
+        assert!(bool_env("TEST_BOOL_MISSING", true));
+        assert!(!bool_env("TEST_BOOL_MISSING", false));
+        
+        // Clean up
+        env::remove_var("TEST_BOOL_TRUE");
+        env::remove_var("TEST_BOOL_1");
+        env::remove_var("TEST_BOOL_YES");
+        env::remove_var("TEST_BOOL_FALSE");
+        env::remove_var("TEST_BOOL_0");
+    }
+
+    #[test]
+    fn test_env_or_function() {
+        // Test with existing environment variable
+        env::set_var("TEST_ENV_VAR", "custom_value");
+        assert_eq!(env_or("TEST_ENV_VAR", "default"), "custom_value");
+        
+        // Test with non-existing environment variable
+        env::remove_var("TEST_ENV_MISSING");
+        assert_eq!(env_or("TEST_ENV_MISSING", "default"), "default");
+        
+        // Clean up
+        env::remove_var("TEST_ENV_VAR");
+    }
+
+    #[test]
+    fn test_config_validation() {
+        let config = Config::from_env();
+        
+        // Test that essential fields are present
+        assert!(!config.bind_address.is_empty());
+        
+        // Test that provider configs have proper defaults
+        assert_eq!(config.openai.base_url, "https://api.openai.com");
+        assert_eq!(config.anthropic.base_url, "https://api.anthropic.com");
+        assert_eq!(config.mistral.base_url, "https://api.mistral.ai");
+        assert_eq!(config.cloudflare.base_url, "https://api.cloudflare.com/client/v4");
+        assert_eq!(config.xai.base_url, "https://api.x.ai");
+        assert_eq!(config.groq.base_url, "https://api.groq.com/openai");
+        
+        // Test search config defaults
+        assert_eq!(config.search.tavily.base_url, "https://api.tavily.com");
+        assert_eq!(config.search.brave.base_url, "https://api.search.brave.com");
+        assert_eq!(config.search.searxng.base_url, "http://localhost:8090");
+        assert!(config.search.searxng.enabled);
+    }
+
+    #[test]
+    fn test_bind_address_parsing() {
+        // Test custom bind address
+        env::set_var("BIND_ADDRESS", "0.0.0.0:8080");
+        let config = Config::from_env();
+        assert_eq!(config.bind_address, "0.0.0.0:8080");
+        
+        // Clean up
+        env::remove_var("BIND_ADDRESS");
+    }
+
+    #[test] 
+    fn test_cache_duration_parsing() {
+        // Use a unique env var name to avoid conflicts with other tests
+        env::remove_var("TEST_SEARCH_CACHE_DURATION");
+        
+        // Test valid cache duration
+        env::set_var("TEST_SEARCH_CACHE_DURATION", "120");
+        let duration = env::var("TEST_SEARCH_CACHE_DURATION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        assert_eq!(duration, 120);
+        
+        // Test invalid cache duration (should use default)
+        env::set_var("TEST_SEARCH_CACHE_DURATION", "invalid");
+        let duration = env::var("TEST_SEARCH_CACHE_DURATION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        assert_eq!(duration, 300);
+        
+        // Test that the actual config parsing works
+        env::set_var("SEARCH_CACHE_DURATION", "456");
+        let config = Config::from_env();
+        assert_eq!(config.search.cache_duration, 456);
+        
+        // Clean up
+        env::remove_var("TEST_SEARCH_CACHE_DURATION");
+        env::remove_var("SEARCH_CACHE_DURATION");
     }
 }

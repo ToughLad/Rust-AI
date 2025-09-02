@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,9 +87,11 @@ pub struct SystemEvent {
 pub struct ConvexService {
     config: Config,
     // In-memory fallback store when Convex is disabled/unconfigured
+    #[allow(dead_code)]
     memory_users: HashMap<String, ConvexUser>, // key: email -> user
 }
 
+#[allow(dead_code)]
 impl ConvexService {
     pub fn new(config: Config) -> Self {
         Self {
@@ -277,5 +279,277 @@ impl ConvexService {
         // TODO: Implement actual Convex integration
         tracing::info!("Deleting chat - chat_id: {}, user_id: {}", chat_id, user_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, ConvexConfig};
+    
+    fn create_test_config(enabled: bool) -> Config {
+        let mut config = Config::from_env();
+        config.convex = ConvexConfig {
+            url: if enabled { "https://test.convex.dev".to_string() } else { "".to_string() },
+            enabled,
+        };
+        config
+    }
+    
+    #[test]
+    fn test_convex_service_new() {
+        let config = create_test_config(true);
+        let service = ConvexService::new(config.clone());
+        
+        // Should create service regardless of configuration
+        assert_eq!(service.config.convex.enabled, true);
+        assert_eq!(service.config.convex.url, "https://test.convex.dev");
+    }
+    
+    #[test]
+    fn test_convex_service_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        assert_eq!(service.config.convex.enabled, false);
+        assert_eq!(service.config.convex.url, "");
+    }
+    
+    #[tokio::test]
+    async fn test_log_api_request_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let event = ApiRequestEvent {
+            request_id: "test_123".to_string(),
+            user_id: Some("user_456".to_string()),
+            operation: "chat".to_string(),
+            tier: "fast".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            temperature: Some(0.7),
+            max_tokens: Some(1000),
+            response_status: 200,
+            response_time_ms: 1500,
+            input_messages: Some(2),
+            input_tokens: Some(200),
+            output_tokens: Some(300),
+            error_message: None,
+            user_agent: None,
+            ip_address: None,
+        };
+        
+        // Should not fail when Convex is disabled
+        let result = service.log_api_request(event).await;
+        assert!(result.is_ok());
+    }
+    
+    #[tokio::test]
+    async fn test_log_usage_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let event = UsageEvent {
+            user_id: Some("user_123".to_string()),
+            operation: "chat".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-3.5-sonnet".to_string(),
+            input_tokens: 100,
+            output_tokens: 200,
+            cost_usd: Some(0.005),
+        };
+        
+        let result = service.log_usage(event).await;
+        assert!(result.is_ok());
+    }
+    
+    #[tokio::test] 
+    async fn test_log_message_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let event = MessageEvent {
+            request_id: "req_789".to_string(),
+            user_id: Some("user_abc".to_string()),
+            chat_id: Some("chat_def".to_string()),
+            message_type: "user".to_string(),
+            content: "Hello, world!".to_string(),
+            provider: None,
+            model: None,
+            token_count: None,
+            created_at: None,
+            attachments: None,
+        };
+        
+        let result = service.log_message(event).await;
+        assert!(result.is_ok());
+    }
+    
+    #[tokio::test]
+    async fn test_get_user_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let result = service.get_user("test@example.com").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // Should return None when disabled
+    }
+    
+    #[tokio::test]
+    async fn test_create_user_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let user = UserAccount {
+            email: "test@example.com".to_string(),
+            password_hash: "hash123".to_string(),
+            subscription_tier: "free".to_string(),
+            api_key: "key123".to_string(),
+            is_active: true,
+        };
+        
+        let result = service.create_user(user).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_empty()); // Should return non-empty string when disabled
+    }
+    
+    #[tokio::test]
+    async fn test_log_system_event_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let result = service.log_system_event(
+            "test_event",
+            "info", 
+            "Test message",
+            Some("user_123"),
+            None
+        ).await;
+        
+        assert!(result.is_ok());
+    }
+    
+    #[tokio::test]
+    async fn test_update_user_usage_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let result = service.update_user_usage(
+            "user_123",
+            10,
+            20
+        ).await;
+        
+        assert!(result.is_ok());
+    }
+    
+    #[tokio::test]
+    async fn test_create_chat_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let result = service.create_chat(
+            "user_123",
+            Some("Test Chat Title")
+        ).await;
+        
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_empty());
+    }
+    
+    #[tokio::test]
+    async fn test_get_user_chats_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let result = service.get_user_chats("user_123").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+    
+    #[tokio::test]
+    async fn test_delete_chat_disabled() {
+        let config = create_test_config(false);
+        let service = ConvexService::new(config);
+        
+        let result = service.delete_chat("chat_123", "user_456").await;
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_convex_user_serialization() {
+        let user = ConvexUser {
+            id: "user_123".to_string(),
+            email: "test@example.com".to_string(),
+            password_hash: "bcrypt_hash_here".to_string(),
+            subscription_tier: "premium".to_string(),
+            api_key: "key123".to_string(),
+            is_active: true,
+            created_at: Some(chrono::DateTime::parse_from_rfc3339("2021-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc)),
+        };
+        
+        // Test serialization
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(json.contains("user_123"));
+        assert!(json.contains("test@example.com"));
+        assert!(json.contains("premium"));
+        
+        // Test deserialization
+        let deserialized: ConvexUser = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, user.id);
+        assert_eq!(deserialized.email, user.email);
+        assert_eq!(deserialized.subscription_tier, user.subscription_tier);
+        assert_eq!(deserialized.is_active, user.is_active);
+    }
+    
+    #[test]
+    fn test_api_request_event_serialization() {
+        let event = ApiRequestEvent {
+            request_id: "req_abc123".to_string(),
+            user_id: Some("user_456".to_string()),
+            operation: "chat".to_string(),
+            tier: "smart".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: Some(0.8),
+            max_tokens: Some(2000),
+            response_status: 200,
+            response_time_ms: 3000,
+            input_messages: Some(3),
+            input_tokens: Some(500),
+            output_tokens: Some(1000),
+            error_message: None,
+            user_agent: None,
+            ip_address: None,
+        };
+        
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ApiRequestEvent = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.request_id, event.request_id);
+        assert_eq!(deserialized.operation, event.operation);
+        assert_eq!(deserialized.provider, event.provider);
+        assert_eq!(deserialized.temperature, event.temperature);
+    }
+    
+    #[test]
+    fn test_usage_event_serialization() {
+        let event = UsageEvent {
+            user_id: Some("user_789".to_string()),
+            operation: "fim".to_string(),
+            provider: "mistral".to_string(),
+            model: "codestral".to_string(),
+            input_tokens: 200,
+            output_tokens: 100,
+            cost_usd: Some(0.0025),
+        };
+        
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: UsageEvent = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.user_id, event.user_id);
+        assert_eq!(deserialized.operation, event.operation);
+        assert_eq!(deserialized.input_tokens, event.input_tokens);
+        assert_eq!(deserialized.cost_usd, event.cost_usd);
     }
 }
