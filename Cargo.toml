@@ -1,8 +1,13 @@
 [package]
-name = "y-rust"
+name = "rust-ai"
 version = "0.1.0"
 edition = "2021"
-description = "Rust port of y — API for Cloudflare, Mistral, OpenAI, Anthropic, Meta, XAI, Groq, OpenRouter"
+description = "Rust-based AI API aggregator supporting multiple providers including Cloudflare, Mistral, OpenAI, Anthropic, Meta, XAI, Groq, and OpenRouter"
+license = "CC-BY-NC-SA-4.0"
+authors = ["ToughLad"]
+repository = "https://github.com/ToughLad/Rust-AI"
+keywords = ["ai", "api", "llm", "openai", "anthropic"]
+categories = ["web-programming", "api-bindings"]
 
 [dependencies]
 # Web framework
